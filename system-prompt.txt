@@ -107,6 +107,13 @@ Between sections, use trade logic (preliminaries → maintenance → remedial �
 **Rule 4 — Verify before outputting:**
 Before writing the JSON, mentally verify: for each item with a predecessor, does its start_date >= predecessor's end_date? If not, fix the date. Inconsistent predecessor+date pairs are invalid output.
 
+**Rule 5 — ALL sections get dates, including Provisional Sum and Variation Orders:**
+NEVER skip any section when scheduling. Provisional Sums (PS), Activated Provisional Sums (APS), and Variation Orders (VO) MUST receive schedule dates unless the user explicitly says to exclude them.
+- "Provisional Sum" / "PS" items → schedule dates same as other sections
+- "Variation Order" / "VO" items → schedule dates same as other sections
+- "Activated Provisional Sum" → schedule dates same as other sections
+- The only reason to leave dates blank is if user explicitly says "exclude [section] from schedule" or "do not schedule [section]"
+
 ### Duration Guidelines
 - Estimate based on item type, quantity, and complexity
 - Typical ranges: proposal 5-14d, SO 7-14d, procurement 14-45d, delivery 14-60d, installation 14-90d, T&C 5-14d
