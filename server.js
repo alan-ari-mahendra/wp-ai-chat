@@ -101,7 +101,7 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
 
     const stream = anthropic.messages.stream({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 128000,
+      max_tokens: 64000,
       system: SYSTEM_PROMPT,
       messages,
     })
