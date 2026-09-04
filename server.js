@@ -8,7 +8,9 @@ import Anthropic from "@anthropic-ai/sdk"
 import { createClient } from "@supabase/supabase-js"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const SYSTEM_PROMPT = readFileSync(join(__dirname, "system-prompt.txt"), "utf8")
+const SYSTEM_PROMPT_PATH = join(__dirname, "system-prompt.txt")
+// Read per-request so system-prompt.txt changes take effect without server restart
+const getSystemPrompt = () => readFileSync(SYSTEM_PROMPT_PATH, "utf8")
 
 const app = express()
 app.use(cors({ origin: "*" }))
@@ -102,7 +104,7 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
     const stream = anthropic.messages.stream({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 64000,
-      system: SYSTEM_PROMPT,
+      system: getSystemPrompt(),
       messages,
     })
 
@@ -116,16 +118,35 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
     const finalMsg = await stream.finalMessage()
     console.log(`[WP AI] done — input=${finalMsg.usage?.input_tokens} output=${finalMsg.usage?.output_tokens} stop=${finalMsg.stop_reason} elapsed=${((Date.now() - startTime) / 1000).toFixed(1)}s`)
 
-    // Log JSON stats
+    // Log JSON stats + preview first 20 items
     const jsonMatch2 = fullText.match(/```json\s*([\s\S]*?)```/)
     if (jsonMatch2) {
       try {
         const parsed2 = JSON.parse(jsonMatch2[1])
         const items2 = parsed2.items || []
+        const cols2 = parsed2.cols || []
         const withDates = Array.isArray(items2[0])
-          ? items2.filter(r => r[1] !== null).length  // compact format: col 1 = start_date
+          ? items2.filter(r => r[1] !== null).length
           : items2.filter(i => i.start_date).length
-        console.log(`[WP AI] JSON — total_items=${items2.length} with_dates=${withDates} complete=${parsed2.complete}`)
+        const withPred = Array.isArray(items2[0]) && cols2.includes("predecessor")
+          ? items2.filter(r => r[cols2.indexOf("predecessor")] !== null).length
+          : items2.filter(i => i.predecessor).length
+        console.log(`[WP AI] JSON — total_items=${items2.length} with_dates=${withDates} with_pred=${withPred} complete=${parsed2.complete}`)
+        console.log(`[WP AI] cols=${JSON.stringify(cols2)}`)
+        console.log(`[WP AI] --- first 20 items preview ---`)
+        const preview = items2.slice(0, 20)
+        for (const row of preview) {
+          if (Array.isArray(row) && cols2.length) {
+            const obj = {}
+            for (let i = 0; i < cols2.length; i++) obj[cols2[i]] = row[i]
+            const { id, start_date, end_date, duration_days, predecessor } = obj
+            console.log(`[WP AI]   id=${String(id).slice(0,8)}.. start=${start_date} end=${end_date} dur=${duration_days} pred=${predecessor}`)
+          } else {
+            const { id, start_date, end_date, duration_days, predecessor } = row
+            console.log(`[WP AI]   id=${String(id).slice(0,8)}.. start=${start_date} end=${end_date} dur=${duration_days} pred=${predecessor}`)
+          }
+        }
+        console.log(`[WP AI] --- end preview ---`)
       } catch (e) {
         console.log(`[WP AI] JSON parse failed: ${e.message}`)
       }
