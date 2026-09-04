@@ -311,10 +311,15 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
             const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
             const before = parsed.items.length
             // Resolve item_no → UUID if AI used boqItemNo as key
+            // After cols expansion, key field is "item_no" (not "id"), so item.id is undefined
             parsed.items = parsed.items.map(item => {
-              if (!UUID_RE.test(item.id)) {
-                const resolved = itemNoToId.get(item.id)
-                if (resolved) return { ...item, id: resolved }
+              const lookupKey = item.id || item.item_no
+              if (!lookupKey || !UUID_RE.test(lookupKey)) {
+                const resolved = itemNoToId.get(lookupKey)
+                if (resolved) {
+                  const { item_no: _drop, ...rest } = item
+                  return { ...rest, id: resolved }
+                }
                 return null // skip — cannot resolve
               }
               return item
