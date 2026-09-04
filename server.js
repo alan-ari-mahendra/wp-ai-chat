@@ -1,5 +1,5 @@
 import "dotenv/config"
-import { readFileSync } from "fs"
+import { readFileSync, writeFileSync, appendFileSync } from "fs"
 import { fileURLToPath } from "url"
 import { dirname, join } from "path"
 import express from "express"
@@ -9,8 +9,22 @@ import { createClient } from "@supabase/supabase-js"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SYSTEM_PROMPT_PATH = join(__dirname, "system-prompt.txt")
+const LOG_PATH = join(__dirname, "wp-ai-latest.log")
+
 // Read per-request so system-prompt.txt changes take effect without server restart
 const getSystemPrompt = () => readFileSync(SYSTEM_PROMPT_PATH, "utf8")
+
+// File logger — overwrites on new request, appends within same request
+let _logFile = false
+function initLog(header) {
+  writeFileSync(LOG_PATH, header + "\n", "utf8")
+  _logFile = true
+}
+function flog(...args) {
+  const line = args.join(" ")
+  console.log(line)
+  if (_logFile) appendFileSync(LOG_PATH, line + "\n", "utf8")
+}
 
 const app = express()
 app.use(cors({ origin: "*" }))
@@ -60,10 +74,20 @@ function buildContextMessage(context) {
   if (context.contractSum)           msg += `- Contract Sum (BoQ Total): RM ${Number(context.contractSum).toLocaleString()}\n`
   if (context.items?.length) {
     msg += `\n### BoQ Items (${context.items.length} items):\n`
-    msg += "| ID | Item No | Description | Amount (RM) | Unit | Qty | Rate | Start Date | End Date | Duration | Predecessor |\n"
-    msg += "|---|---------|-------------|-------------|------|-----|------|------------|----------|----------|-------------|\n"
+    msg += "| Item No | Description | Amount (RM) | Unit | Qty | Rate | Start Date | End Date | Duration | Predecessor |\n"
+    msg += "|---------|-------------|-------------|------|-----|------|------------|----------|----------|-------------|\n"
+    const itemNoCount = {}
     for (const item of context.items) {
-      msg += `| ${item.id} | ${item.boqItemNo} | ${item.description} | ${item.amount} | ${item.unit || '-'} | ${item.quantity || '-'} | ${item.rate || '-'} | ${item.startDate || '-'} | ${item.endDate || '-'} | ${item.duration || '-'} | ${item.predecessor || '-'} |\n`
+      itemNoCount[item.boqItemNo] = (itemNoCount[item.boqItemNo] || 0) + 1
+    }
+    const itemNoSeen = {}
+    for (const item of context.items) {
+      let displayNo = item.boqItemNo
+      if (itemNoCount[item.boqItemNo] > 1) {
+        itemNoSeen[item.boqItemNo] = (itemNoSeen[item.boqItemNo] || 0) + 1
+        displayNo = `${item.boqItemNo}_${itemNoSeen[item.boqItemNo]}`
+      }
+      msg += `| ${displayNo} | ${item.description} | ${item.amount} | ${item.unit || '-'} | ${item.quantity || '-'} | ${item.rate || '-'} | ${item.startDate || '-'} | ${item.endDate || '-'} | ${item.duration || '-'} | ${item.predecessor || '-'} |\n`
     }
   }
   if (context.headers?.length) {
@@ -99,12 +123,46 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
       { role: "user", content: message + contextMessage },
     ]
 
-    console.log(`[WP AI] items=${context?.items?.length ?? 0} msgLen=${(message + contextMessage).length}`)
+    const systemPrompt = getSystemPrompt()
+
+    // Init log file — overwrites previous request's log
+    initLog([
+      `=== WP AI Request @ ${new Date().toISOString()} ===`,
+      `project=${projectId} version=${versionId} items=${context?.items?.length ?? 0}`,
+      `msgLen=${(message + contextMessage).length}`,
+      ``,
+      `=== RAW USER MESSAGE ===`,
+      message,
+      `=== END RAW USER MESSAGE ===`,
+      ``,
+      `=== CONTEXT (first 3000 chars) ===`,
+      contextMessage.slice(0, 3000),
+      `=== END CONTEXT ===`,
+    ].join("\n"))
+    flog(`[WP AI] items=${context?.items?.length ?? 0} msgLen=${(message + contextMessage).length}`)
+
+    // Build itemNo → UUID lookup map (with suffix for duplicate boqItemNos)
+    const itemNoToId = new Map()
+    const _noCount = {}
+    const _noSeen = {}
+    for (const item of (context?.items || [])) {
+      if (!item.boqItemNo || !item.id) continue
+      _noCount[item.boqItemNo] = (_noCount[item.boqItemNo] || 0) + 1
+    }
+    for (const item of (context?.items || [])) {
+      if (!item.boqItemNo || !item.id) continue
+      let key = item.boqItemNo
+      if (_noCount[item.boqItemNo] > 1) {
+        _noSeen[item.boqItemNo] = (_noSeen[item.boqItemNo] || 0) + 1
+        key = `${item.boqItemNo}_${_noSeen[item.boqItemNo]}`
+      }
+      itemNoToId.set(key, item.id)
+    }
 
     const stream = anthropic.messages.stream({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 64000,
-      system: getSystemPrompt(),
+      system: systemPrompt,
       messages,
     })
 
@@ -116,7 +174,12 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
     })
 
     const finalMsg = await stream.finalMessage()
-    console.log(`[WP AI] done — input=${finalMsg.usage?.input_tokens} output=${finalMsg.usage?.output_tokens} stop=${finalMsg.stop_reason} elapsed=${((Date.now() - startTime) / 1000).toFixed(1)}s`)
+    flog(`[WP AI] done — input=${finalMsg.usage?.input_tokens} output=${finalMsg.usage?.output_tokens} stop=${finalMsg.stop_reason} elapsed=${((Date.now() - startTime) / 1000).toFixed(1)}s`)
+
+    // Log raw AI response
+    if (_logFile) {
+      appendFileSync(LOG_PATH, `\n=== RAW AI RESPONSE ===\n${fullText}\n=== END RAW AI RESPONSE ===\n\n`, "utf8")
+    }
 
     // Log JSON stats + preview first 20 items
     const jsonMatch2 = fullText.match(/```json\s*([\s\S]*?)```/)
@@ -132,26 +195,42 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
           ? items2.filter(r => r[cols2.indexOf("predecessor")] !== null).length
           : items2.filter(i => i.predecessor).length
         console.log(`[WP AI] JSON — total_items=${items2.length} with_dates=${withDates} with_pred=${withPred} complete=${parsed2.complete}`)
+        if (_logFile) appendFileSync(LOG_PATH, `[WP AI] JSON — total_items=${items2.length} with_dates=${withDates} with_pred=${withPred} complete=${parsed2.complete}\n`, "utf8")
         console.log(`[WP AI] cols=${JSON.stringify(cols2)}`)
-        console.log(`[WP AI] --- first 20 items preview ---`)
-        const preview = items2.slice(0, 20)
-        for (const row of preview) {
+        if (_logFile) appendFileSync(LOG_PATH, `[WP AI] cols=${JSON.stringify(cols2)}\n`, "utf8")
+
+        const parseRow = (row) => {
           if (Array.isArray(row) && cols2.length) {
             const obj = {}
             for (let i = 0; i < cols2.length; i++) obj[cols2[i]] = row[i]
-            const { id, start_date, end_date, duration_days, predecessor } = obj
-            console.log(`[WP AI]   id=${String(id).slice(0,8)}.. start=${start_date} end=${end_date} dur=${duration_days} pred=${predecessor}`)
-          } else {
-            const { id, start_date, end_date, duration_days, predecessor } = row
-            console.log(`[WP AI]   id=${String(id).slice(0,8)}.. start=${start_date} end=${end_date} dur=${duration_days} pred=${predecessor}`)
+            return obj
           }
+          return row
         }
-        console.log(`[WP AI] --- end preview ---`)
+        const itemKey = cols2.includes("item_no") ? "item_no" : "id"
+
+        // Console: first 20 only
+        console.log(`[WP AI] --- first 20 items preview ---`)
+        for (const row of items2.slice(0, 20)) {
+          const obj = parseRow(row)
+          console.log(`[WP AI]   ${itemKey}=${obj[itemKey]} start=${obj.start_date} end=${obj.end_date} dur=${obj.duration_days} pred=${obj.predecessor}`)
+        }
+        console.log(`[WP AI] --- end preview (console) ---`)
+
+        // File: ALL items
+        if (_logFile) {
+          appendFileSync(LOG_PATH, `[WP AI] --- all ${items2.length} items ---\n`, "utf8")
+          for (const row of items2) {
+            const obj = parseRow(row)
+            appendFileSync(LOG_PATH, `  ${itemKey}=${obj[itemKey]} start=${obj.start_date} end=${obj.end_date} dur=${obj.duration_days} pred=${obj.predecessor}\n`, "utf8")
+          }
+          appendFileSync(LOG_PATH, `[WP AI] --- end all items ---\n`, "utf8")
+        }
       } catch (e) {
-        console.log(`[WP AI] JSON parse failed: ${e.message}`)
+        flog(`[WP AI] JSON parse failed: ${e.message}`)
       }
     } else {
-      console.log(`[WP AI] No JSON block in response`)
+      flog(`[WP AI] No JSON block in response`)
     }
 
     if (versionId && projectId && !skipSave) {
@@ -171,10 +250,31 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
               })
               delete parsed.cols
             }
+            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+            const before = parsed.items.length
+            // Resolve item_no → UUID if AI used boqItemNo as key
+            parsed.items = parsed.items.map(item => {
+              if (!UUID_RE.test(item.id)) {
+                const resolved = itemNoToId.get(item.id)
+                if (resolved) return { ...item, id: resolved }
+                return null // skip — cannot resolve
+              }
+              return item
+            }).filter(Boolean)
+            const unresolved = before - parsed.items.length
+            if (unresolved > 0) flog(`[WP AI] Skipped ${unresolved} rows with unresolvable IDs`)
+            // Remove duplicates — keep first occurrence
+            const seenIds = new Set()
+            parsed.items = parsed.items.filter(item => {
+              if (seenIds.has(item.id)) return false
+              seenIds.add(item.id)
+              return true
+            })
+            flog(`[WP AI] Applied ${parsed.items.length} valid rows (of ${before} total)`)
             appliedJson = parsed
           }
         } catch (e) {
-          console.error("[WP AI] JSON parse error:", e.message)
+          flog(`[WP AI] JSON parse error: ${e.message}`)
         }
       }
 
@@ -194,7 +294,7 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
     send({ type: "done" })
     res.end()
   } catch (err) {
-    console.error("[WP AI] Error:", err.message, err.status)
+    flog(`[WP AI] Error: ${err.message} status=${err.status}`)
     const isOverloaded = err.status === 529 || err.message?.includes("Overloaded")
     send({
       type: "error",

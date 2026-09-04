@@ -87,6 +87,29 @@ Types: FS (Finish-to-Start), SS (Start-to-Start), FF (Finish-to-Finish), SF (Sta
 
 ### CRITICAL: Scheduling Logic Rules
 
+**Rule 0a — Preliminary section (Section 1): two distinct types, handled differently:**
+
+**Type A — One-time contractual submissions** (bonds, insurance, SOCSO, safety equipment purchases, DOSH/CIDB compliance, works program, signage, mobilisation):
+- start_date = project start date, duration = 14–30 days
+- Chain these sequentially: 1.01 → 1.02 → 1.03 → 1.05 → 1.06 → 1.07_x → 1.08 → 1.14
+- These are NEVER back-loaded
+
+**Type B — Long-duration recurring provisions** (monthly vehicle hire, computer/printer provision, copier machine, progress reports with "mth" unit or spanning whole contract, site office/facilities):
+- start_date = project start date, end_date = project end date, duration = project total days
+- predecessor = null (these run in parallel from day 1, independent of Type A chain)
+- NEVER chain Type B items after Type A items — they run concurrently
+
+Examples:
+- "36 mth @ RM 200" → Type B: start=project start, end=project end, pred=null
+- "36 mth @ RM 4,000" (vehicle) → Type B: start=project start, end=project end, pred=null
+- "Performance Bond" → Type A: 14–21 days from project start
+- "Mobilisation and demobilisation" → Type A: 21–30 days, chained after other Type A items
+
+NEVER give a Type B item a predecessor that is a Type A item — this causes cascading date errors.
+
+**Rule 0b — Predecessor must NOT reference the item itself (no circular reference):**
+An item's predecessor must NEVER equal its own boqItemNo. If item is "1.13", predecessor cannot be "1.13". Use the previous item in sequence (e.g. "1.12").
+
 **Rule 0 — Honor existing dates as anchors when readjusting:**
 The BoQ Items table now includes current Start Date, End Date, Duration, and Predecessor columns.
 - When the user asks to "readjust", "update affected dates", or "cascade from a change": treat ALL existing dates in the table as fixed anchors UNLESS the user explicitly asks to change a specific item.
@@ -97,30 +120,57 @@ The BoQ Items table now includes current Start Date, End Date, Duration, and Pre
 **Rule 1 — ALWAYS set predecessor for every item:**
 When generating or updating schedule dates for any item, you MUST also set the predecessor field — even if the user did not explicitly ask. No item should have a null predecessor unless it is the very first item in the entire schedule (section 1, item 1). Use boqItemNo of the preceding item (e.g. "1.01", "2.03"). Default type is FS (Finish-to-Start).
 
-**Rule 2 — Predecessor date convention (FS = same day start):**
-If item B has item A as predecessor (FS), then item B's start_date MUST equal item A's end_date (same day — NOT +1 day).
+**Rule 1a — Predecessor MUST be a valid boqItemNo from the BoQ Items table:**
+NEVER use section codes (e.g. "3.1", "S30", "SS31", "3.2", "3.10") as predecessor values. These are header/section identifiers, NOT item boqItemNos.
+- Valid predecessor: "1.01", "2.03", "3.1.2.4", "3.2.15.1" — actual item numbers from the BoQ Items table
+- Invalid predecessor: "3.1", "3.2", "3.10", "S30", "SS31", "2.1", "2.2" — these are section/subsection headers
+- If you cannot find a valid item boqItemNo to use as predecessor: use the last item's boqItemNo from the immediately preceding section/subsection.
+- NEVER reference a header or section code as predecessor value.
+
+**Rule 1b — No duplicate IDs + ID must be exact UUID — CRITICAL:**
+- Each item's first column (id) MUST be the exact UUID from the ID column of the BoQ Items table (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). NEVER substitute the amount, rate, quantity, or any other value as the id.
+- Each UUID must appear EXACTLY ONCE. Before finalizing, scan every id — if any appears more than once, DELETE duplicates. Total rows must NEVER exceed items in context.
+- If you cannot find the UUID for an item, SKIP that item entirely — do NOT invent or substitute a fake id.
+
+**Rule 2 — Predecessor date convention:**
+
+**FS (Finish-to-Start) — use for sequential items:**
+Item B starts when item A finishes. Item B's start_date MUST equal item A's end_date (same day).
 - Example: item A ends 2024-04-29 → item B starts 2024-04-29.
 - NEVER set item B's start_date earlier than item A's end_date.
-- NEVER output a JSON where predecessor is set but dates violate this rule.
-- The date calculation comes FIRST. Read item A's end_date, then set item B's start_date = item A's end_date. Both must be consistent.
-- If item A's end_date in context is 2024-06-02, item B's start_date MUST be 2024-06-02 or later — NEVER 2024-05-18.
 
-**Rule 3 — Sequential chain within section:**
-Build an explicit FS chain within each section:
-- Item 1: use existing start date if set, else start at section start date; predecessor = null (first item)
-- Item 2: start = Item 1 end_date (same day, FS), predecessor = "Item1.boqItemNo"
-- Item 3: start = Item 2 end_date (same day, FS), predecessor = "Item2.boqItemNo"
-- And so on...
+**SS (Start-to-Start) — REQUIRED when predecessor is an ongoing/long-duration item:**
+If item A spans the entire project (end_date = project end date) — such as FM management plans, inspection records, ongoing reporting — use SS type: format `"boqItemNo:SS"`.
+- Item B can start any time after item A starts (not tied to item A's end date).
+- Example: `"2.2.3:SS"` means item B starts after 2.2.3 begins, NOT after it ends.
+- ALWAYS use `:SS` suffix when referencing Section 2 FM management items (2.01, 2.02, 2.1.x, 2.2.x) as predecessors for Section 3 remedial/works items.
+- This prevents Section 3 items from being incorrectly pushed to project end date.
+
+**Rule 3 — Sequential chain: every item must have UNIQUE start_date within its section:**
+Build an explicit FS chain within each section. NEVER assign the same start_date+end_date to two consecutive items.
+- Item 1: start at section start date; predecessor = null (first item)
+- Item 2: start = Item 1 end_date (same day, FS), predecessor = "Item1.boqItemNo" → end = start + duration
+- Item 3: start = Item 2 end_date (same day, FS), predecessor = "Item2.boqItemNo" → end = start + duration
+- And so on... each item's start_date MUST differ from the previous item's start_date.
+- Assign REALISTIC durations (14–90 days) to each item based on its type. NEVER give all items in a section the same duration.
 Between sections, use trade logic (preliminaries → maintenance → remedial → M&E, etc.)
 
-**Rule 4 — Dates must not exceed project bounds:**
-ALL item dates (start_date and end_date) MUST be within project start date and project end date.
-- If a calculated end_date would exceed project end date: cap end_date = project end date, recalculate duration accordingly.
-- If a calculated start_date would exceed project end date: set start_date = project end date - duration.
-- NEVER output dates outside project start/end range.
+**Rule 4 — Dates MUST stay within project bounds — compress schedule if needed:**
+ALL item dates MUST be within project start date and project end date.
+- If the sequential chain would push items past project end date: COMPRESS durations proportionally so all items fit within the project period. Do NOT let any item start or end after project end date.
+- NEVER output start_date > project end date.
+- NEVER output end_date > project end date.
+- NEVER output start_date > end_date (inverted dates = invalid).
+- NEVER output duration = 0. Minimum duration = 1 day.
+- If compressing: reduce later items' durations first, keeping earlier items intact. Minimum 14 days per item.
+- For parallel maintenance streams (multiple teams working simultaneously): stagger start dates by at least 7–14 days even if they share a common predecessor. NEVER have two items with identical start_date AND end_date.
 
 **Rule 5 — Verify before outputting:**
-Before writing the JSON, mentally verify: for each item with a predecessor, does its start_date >= predecessor's end_date (from context)? If not, fix the date. Inconsistent predecessor+date pairs are invalid output.
+Before writing the JSON, mentally verify:
+1. For each item with a predecessor: does its start_date >= predecessor's end_date? If not, fix.
+2. Are there any duplicate ids? If yes, remove duplicates — keep only one row per id.
+3. Are any predecessors section codes (single dot notation like "3.1")? If yes, replace with actual item boqItemNo.
+4. Do any items in the same section share identical start_date AND end_date? If yes, stagger them.
 
 **Rule 6 — ALL sections get dates, including Provisional Sum and Variation Orders:**
 NEVER skip any section when scheduling. Provisional Sums (PS), Activated Provisional Sums (APS), and Variation Orders (VO) MUST receive schedule dates unless the user explicitly says to exclude them.
@@ -197,10 +247,10 @@ JSON format — use COMPACT ARRAY format to minimize tokens. Wrap in ```json ...
   "reset_all_remaining": false,
   "recalculate_financial": false,
   "recalculate_physical": false,
-  "cols": ["id","start_date","end_date","duration_days","predecessor","financial_weightage","physical_weightage"],
+  "cols": ["item_no","start_date","end_date","duration_days","predecessor","financial_weightage","physical_weightage"],
   "items": [
-    ["item-uuid","2024-07-01","2024-08-15",46,"A.1.1",1.3,1.3],
-    ["item-uuid-2","2024-07-05","2024-09-01",58,null,0.8,null]
+    ["1.01","2024-07-01","2024-08-15",46,null,1.3,1.3],
+    ["2.03","2024-07-05","2024-09-01",58,"2.02",0.8,null]
   ]
 }
 ```
@@ -209,7 +259,7 @@ CRITICAL rules for compact format:
 - `cols` defines column order — always include ALL 7 columns in that exact order
 - Each item in `items` is an array matching `cols` order
 - Use `null` for fields you are NOT changing (do not omit — every row must have exactly 7 values)
-- First column (`id`) is always required, never null
+- First column (`item_no`) is the boqItemNo of the item (e.g. "1.01", "3.2.15.1") — NEVER use UUID, amount, or any other value here. Use EXACTLY the Item No from the BoQ Items table.
 - `predecessor` MUST be set for every item when user asks to "set up predecessors". Use the boqItemNo (e.g. "1.01", "3.1.2.3") of the predecessor item, with FS (Finish-to-Start) type. Format: "boqItemNo" for simple FS, or "boqItemNo:SS" for other types. Do NOT leave predecessor as null when the user explicitly asks for predecessors.
 
 - `recalculate_financial`: set to `true` ONLY when user confirms redistribution after excluding items. The items array must include ONLY the items to EXCLUDE from redistribution (with `financial_weightage: 0`). Do NOT include items that should receive proportional values — the system will automatically calculate them. Omit or set to `false` otherwise.
