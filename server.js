@@ -52,6 +52,62 @@ async function requireAuth(req, res, next) {
   next()
 }
 
+// Keywords that mean "all items" — skip filtering
+const ALL_SCOPE_KEYWORDS = /\b(all items|all activities|all tasks|everything|entire|whole project|full schedule|generate schedule|plan work programme|back-load|front-load|recalculate all|redistribute)\b/i
+
+function filterContextItems(message, context) {
+  const items = context?.items
+  if (!items?.length) return context
+
+  // If message implies full scope, send everything
+  if (ALL_SCOPE_KEYWORDS.test(message)) return context
+
+  // Extract item numbers mentioned in message (e.g. "1.14", "3.2.1.1", "2.2.3")
+  const mentioned = new Set(
+    [...message.matchAll(/\b(\d+(?:\.\d+)+)\b/g)].map(m => m[1])
+  )
+  if (mentioned.size === 0) return context
+
+  // Build boqItemNo → item map + successor map
+  const byItemNo = new Map(items.map(i => [i.boqItemNo, i]))
+  const successors = new Map() // itemNo → [successorItemNos]
+  for (const item of items) {
+    if (!item.predecessor) continue
+    const predNo = item.predecessor.split(":")[0].trim()
+    if (!successors.has(predNo)) successors.set(predNo, [])
+    successors.get(predNo).push(item.boqItemNo)
+  }
+
+  // BFS: collect mentioned items + all transitive successors
+  const relevant = new Set()
+  const queue = [...mentioned]
+  while (queue.length) {
+    const no = queue.shift()
+    if (relevant.has(no)) continue
+    relevant.add(no)
+    for (const succ of (successors.get(no) || [])) {
+      if (!relevant.has(succ)) queue.push(succ)
+    }
+  }
+
+  // Also include direct predecessors of mentioned items (for date context)
+  for (const no of mentioned) {
+    const item = byItemNo.get(no)
+    if (item?.predecessor) {
+      const predNo = item.predecessor.split(":")[0].trim()
+      relevant.add(predNo)
+    }
+  }
+
+  const filtered = items.filter(i => relevant.has(i.boqItemNo))
+
+  // If filtering leaves > 80% of items, not worth filtering — send all
+  if (filtered.length > items.length * 0.8) return context
+
+  console.log(`[WP AI] Context filtered: ${filtered.length}/${items.length} items (mentioned: ${[...mentioned].join(", ")})`)
+  return { ...context, items: filtered }
+}
+
 function buildContextMessage(context) {
   let msg = `\n\n## Current Project Context\n`
   msg += `- Today's Date: ${new Date().toISOString().split("T")[0]}\n`
@@ -117,7 +173,8 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
 
   try {
-    const contextMessage = context ? buildContextMessage(context) : ""
+    const filteredContext = context ? filterContextItems(message, context) : context
+    const contextMessage = filteredContext ? buildContextMessage(filteredContext) : ""
     const messages = [
       ...(history || []).map(m => ({ role: m.role, content: m.content })),
       { role: "user", content: message + contextMessage },
@@ -128,7 +185,7 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
     // Init log file — overwrites previous request's log
     initLog([
       `=== WP AI Request @ ${new Date().toISOString()} ===`,
-      `project=${projectId} version=${versionId} items=${context?.items?.length ?? 0}`,
+      `project=${projectId} version=${versionId} items_total=${context?.items?.length ?? 0} items_sent=${filteredContext?.items?.length ?? 0}`,
       `msgLen=${(message + contextMessage).length}`,
       ``,
       `=== RAW USER MESSAGE ===`,
@@ -139,8 +196,9 @@ app.post("/wp-ai-chat", requireAuth, async (req, res) => {
       contextMessage.slice(0, 3000),
       `=== END CONTEXT ===`,
     ].join("\n"))
-    flog(`[WP AI] items=${context?.items?.length ?? 0} msgLen=${(message + contextMessage).length}`)
+    flog(`[WP AI] items_sent=${filteredContext?.items?.length ?? 0}/${context?.items?.length ?? 0} msgLen=${(message + contextMessage).length}`)
 
+    // Build itemNo → UUID lookup map from FULL context (not filtered) for correct resolution
     // Build itemNo → UUID lookup map (with suffix for duplicate boqItemNos)
     const itemNoToId = new Map()
     const _noCount = {}

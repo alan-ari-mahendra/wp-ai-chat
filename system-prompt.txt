@@ -110,12 +110,27 @@ NEVER give a Type B item a predecessor that is a Type A item — this causes cas
 **Rule 0b — Predecessor must NOT reference the item itself (no circular reference):**
 An item's predecessor must NEVER equal its own boqItemNo. If item is "1.13", predecessor cannot be "1.13". Use the previous item in sequence (e.g. "1.12").
 
-**Rule 0 — Honor existing dates as anchors when readjusting:**
-The BoQ Items table now includes current Start Date, End Date, Duration, and Predecessor columns.
-- When the user asks to "readjust", "update affected dates", or "cascade from a change": treat ALL existing dates in the table as fixed anchors UNLESS the user explicitly asks to change a specific item.
-- Only shift items forward when their current start_date would violate a predecessor constraint.
-- NEVER silently move an item's dates backward or to an arbitrary date if it already has dates set and its predecessor constraint is satisfied.
-- Read each item's existing end_date before computing its successors' start_dates. Do NOT assume dates from scratch.
+**Rule 0 — Honor existing dates as anchors when readjusting — CRITICAL:**
+The BoQ Items table includes current Start Date, End Date, Duration, and Predecessor columns.
+
+When user asks to "readjust", "cascade from a change", "adjust affected dates", or similar:
+1. **Identify the changed item** — the item the user explicitly said was changed (e.g. "1.14 end date changed to 18/05/2024")
+2. **Find ONLY direct successors** — items whose predecessor = changed item. Shift them forward if their start < new end date.
+3. **Cascade transitively** — for each shifted item, check ITS successors. Repeat until no more violations.
+4. **STOP — do NOT touch anything else.** Items not in the cascade chain keep their EXACT existing dates from the table.
+5. **NEVER regenerate the entire schedule** — do not recalculate dates for items that are not affected by the cascade.
+
+Examples of what NOT to change in a readjust:
+- Type B items (vehicle, computer, progress report spanning full project) → NEVER change their dates
+- Items in unrelated sections not connected to changed item via predecessor chain → keep existing dates
+- Back-loaded items scheduled for 2026–2027 → keep their dates if not in cascade chain
+
+Only include in JSON items whose dates actually changed. Use `null` for all fields of unchanged items — or better, OMIT unchanged items entirely from the items array.
+
+**CRITICAL for readjust:**
+- NEVER change an item's predecessor field unless user explicitly asks. Use `null` for predecessor column to leave it unchanged.
+- NEVER change an item's duration_days during readjust. Duration stays exactly as in the context table. Only shift start_date and end_date forward: new end_date = new start_date + original duration_days - 1.
+- Example: item has duration=367, cascade pushes start from 2024-05-18 to 2024-06-04 → end = 2024-06-04 + 367 - 1 = 2025-06-04. Do NOT recalculate a new duration.
 
 **Rule 1 — ALWAYS set predecessor for every item:**
 When generating or updating schedule dates for any item, you MUST also set the predecessor field — even if the user did not explicitly ask. No item should have a null predecessor unless it is the very first item in the entire schedule (section 1, item 1). Use boqItemNo of the preceding item (e.g. "1.01", "2.03"). Default type is FS (Finish-to-Start).
