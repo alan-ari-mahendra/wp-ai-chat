@@ -58,10 +58,10 @@ function buildContextMessage(context) {
   if (context.contractSum)           msg += `- Contract Sum (BoQ Total): RM ${Number(context.contractSum).toLocaleString()}\n`
   if (context.items?.length) {
     msg += `\n### BoQ Items (${context.items.length} items):\n`
-    msg += "| ID | Item No | Description | Amount (RM) | Unit | Qty | Rate |\n"
-    msg += "|---|---------|-------------|-------------|------|-----|------|\n"
+    msg += "| ID | Item No | Description | Amount (RM) | Unit | Qty | Rate | Start Date | End Date | Duration | Predecessor |\n"
+    msg += "|---|---------|-------------|-------------|------|-----|------|------------|----------|----------|-------------|\n"
     for (const item of context.items) {
-      msg += `| ${item.id} | ${item.boqItemNo} | ${item.description} | ${item.amount} | ${item.unit || '-'} | ${item.quantity || '-'} | ${item.rate || '-'} |\n`
+      msg += `| ${item.id} | ${item.boqItemNo} | ${item.description} | ${item.amount} | ${item.unit || '-'} | ${item.quantity || '-'} | ${item.rate || '-'} | ${item.startDate || '-'} | ${item.endDate || '-'} | ${item.duration || '-'} | ${item.predecessor || '-'} |\n`
     }
   }
   if (context.headers?.length) {

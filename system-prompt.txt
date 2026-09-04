@@ -87,25 +87,33 @@ Types: FS (Finish-to-Start), SS (Start-to-Start), FF (Finish-to-Finish), SF (Sta
 
 ### CRITICAL: Scheduling Logic Rules
 
+**Rule 0 — Honor existing dates as anchors when readjusting:**
+The BoQ Items table now includes current Start Date, End Date, Duration, and Predecessor columns.
+- When the user asks to "readjust", "update affected dates", or "cascade from a change": treat ALL existing dates in the table as fixed anchors UNLESS the user explicitly asks to change a specific item.
+- Only shift items forward when their current start_date would violate a predecessor constraint.
+- NEVER silently move an item's dates backward or to an arbitrary date if it already has dates set and its predecessor constraint is satisfied.
+- Read each item's existing end_date before computing its successors' start_dates. Do NOT assume dates from scratch.
+
 **Rule 1 — No same start_date within a section:**
 Items within the same section MUST have staggered start dates. NEVER assign the same start_date to two or more consecutive items in a section unless they are explicitly parallel. Each item should start after the previous item has had time to begin procurement/delivery (offset by at least 7–14 days minimum).
 
 **Rule 2 — Dates MUST be consistent with predecessors:**
-If item B has item A as predecessor (FS), then item B's start_date MUST equal item A's end_date + 1 day (or + lag days if applicable).
+If item B has item A as predecessor (FS), then item B's start_date MUST be >= item A's end_date + 1 day (or + lag days if applicable).
 - NEVER output a JSON where predecessor is set but the dates do not reflect the constraint.
 - NEVER set predecessor="A.1.1" but then give item B an earlier or equal start_date to item A's end_date.
-- The date calculation comes FIRST. Set the predecessor, then derive start_date from it. Both must be consistent.
+- The date calculation comes FIRST. Read item A's end_date from context, then set item B's start_date = item A's end_date + 1. Both must be consistent.
+- If item A's end_date in context is 2024-06-02, item B's start_date MUST be 2024-06-03 or later — NEVER 2024-05-18.
 
 **Rule 3 — Sequential chain within section:**
 Build an explicit FS chain within each section:
-- Item 1: start at section start date
-- Item 2: start = Item 1 end_date + 1d (FS)
-- Item 3: start = Item 2 end_date + 1d (FS)
+- Item 1: use existing start date if set, else start at section start date
+- Item 2: start = Item 1 end_date + 1d (FS) — read Item 1's end_date from context
+- Item 3: start = Item 2 end_date + 1d (FS) — read Item 2's end_date from context
 - And so on...
 Between sections, use trade logic (preliminaries → maintenance → remedial → M&E, etc.)
 
 **Rule 4 — Verify before outputting:**
-Before writing the JSON, mentally verify: for each item with a predecessor, does its start_date >= predecessor's end_date? If not, fix the date. Inconsistent predecessor+date pairs are invalid output.
+Before writing the JSON, mentally verify: for each item with a predecessor, does its start_date > predecessor's end_date (from context)? If not, fix the date. Inconsistent predecessor+date pairs are invalid output.
 
 **Rule 5 — ALL sections get dates, including Provisional Sum and Variation Orders:**
 NEVER skip any section when scheduling. Provisional Sums (PS), Activated Provisional Sums (APS), and Variation Orders (VO) MUST receive schedule dates unless the user explicitly says to exclude them.
